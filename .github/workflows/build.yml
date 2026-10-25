@@ -132,6 +132,13 @@ jobs:
                   android:hint="Phone number"
                   android:inputType="phone" />
 
+              <Button
+                  android:id="@+id/pickButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:text="Choose from contacts" />
+
               <EditText
                   android:id="@+id/secondsInput"
                   android:layout_width="match_parent"
@@ -173,6 +180,8 @@ jobs:
           import android.content.pm.PackageManager
           import android.os.Build
           import android.os.Bundle
+          import android.provider.ContactsContract
+          import androidx.activity.result.contract.ActivityResultContracts
           import android.widget.Button
           import android.widget.EditText
           import android.widget.TextView
@@ -185,6 +194,18 @@ jobs:
 
               private val handler = android.os.Handler(android.os.Looper.getMainLooper())
               private lateinit var statusText: TextView
+              private lateinit var numberInput: EditText
+
+              private val pickContact = registerForActivityResult(
+                  ActivityResultContracts.StartActivityForResult()
+              ) { result ->
+                  val uri = result.data?.data ?: return@registerForActivityResult
+                  contentResolver.query(
+                      uri, arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER), null, null, null
+                  )?.use { c ->
+                      if (c.moveToFirst()) numberInput.setText(c.getString(0))
+                  }
+              }
 
               private val refresh = object : Runnable {
                   override fun run() {
@@ -201,9 +222,15 @@ jobs:
                   super.onCreate(savedInstanceState)
                   setContentView(R.layout.activity_main)
 
-                  val numberInput = findViewById<EditText>(R.id.numberInput)
+                  numberInput = findViewById(R.id.numberInput)
                   val secondsInput = findViewById<EditText>(R.id.secondsInput)
                   statusText = findViewById(R.id.statusText)
+
+                  findViewById<Button>(R.id.pickButton).setOnClickListener {
+                      pickContact.launch(
+                          Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
+                      )
+                  }
 
                   findViewById<Button>(R.id.startButton).setOnClickListener {
                       val number = numberInput.text.toString().trim()
