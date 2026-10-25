@@ -90,6 +90,7 @@ jobs:
               <uses-permission android:name="android.permission.CALL_PHONE" />
               <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
               <uses-permission android:name="android.permission.READ_CALL_LOG" />
+              <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -381,9 +382,14 @@ jobs:
                       .setOngoing(true)
                       .build()
 
-                  if (Build.VERSION.SDK_INT >= 29) {
-                      startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
-                  } else {
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+                      } else {
+                          startForeground(NOTIF_ID, notification)
+                      }
+                  } catch (e: Exception) {
+                      // Fall back to a plain foreground notification so the app does not crash
                       startForeground(NOTIF_ID, notification)
                   }
               }
