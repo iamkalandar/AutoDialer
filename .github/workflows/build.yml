@@ -1,1 +1,406 @@
+name: Build APK
 
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Create project files
+        run: |
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AutoRedial"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.autoredial"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.autoredial"
+                  minSdk = 28
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+              <uses-permission android:name="android.permission.READ_CALL_LOG" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="Auto Redial"
+                  android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".RedialService"
+                      android:exported="false"
+                      android:foregroundServiceType="phoneCall" />
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/res/layout
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="24dp">
+
+              <EditText
+                  android:id="@+id/numberInput"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:hint="Phone number"
+                  android:inputType="phone" />
+
+              <EditText
+                  android:id="@+id/secondsInput"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="12dp"
+                  android:hint="Hang up after (seconds)"
+                  android:inputType="number"
+                  android:text="22" />
+
+              <Button
+                  android:id="@+id/startButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="24dp"
+                  android:text="Start" />
+
+              <Button
+                  android:id="@+id/stopButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:text="Stop" />
+
+              <TextView
+                  android:id="@+id/statusText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="24dp"
+                  android:text="Idle"
+                  android:textSize="18sp" />
+          </LinearLayout>
+          EOF
+          mkdir -p app/src/main/java/com/example/autoredial
+          cat > app/src/main/java/com/example/autoredial/MainActivity.kt <<'EOF'
+          package com.example.autoredial
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+
+              private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+              private lateinit var statusText: TextView
+
+              private val refresh = object : Runnable {
+                  override fun run() {
+                      statusText.text = if (RedialService.running) {
+                          "Running: attempt #${RedialService.attempts}"
+                      } else {
+                          "Idle (total attempts: ${RedialService.attempts})"
+                      }
+                      handler.postDelayed(this, 500)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  val numberInput = findViewById<EditText>(R.id.numberInput)
+                  val secondsInput = findViewById<EditText>(R.id.secondsInput)
+                  statusText = findViewById(R.id.statusText)
+
+                  findViewById<Button>(R.id.startButton).setOnClickListener {
+                      val number = numberInput.text.toString().trim()
+                      val seconds = secondsInput.text.toString().toIntOrNull() ?: 22
+                      if (number.isEmpty()) {
+                          Toast.makeText(this, "Enter a number", Toast.LENGTH_SHORT).show()
+                          return@setOnClickListener
+                      }
+                      if (!hasPermissions()) {
+                          requestPermissions()
+                          return@setOnClickListener
+                      }
+                      val intent = Intent(this, RedialService::class.java).apply {
+                          putExtra(RedialService.EXTRA_NUMBER, number)
+                          putExtra(RedialService.EXTRA_SECONDS, seconds.coerceIn(5, 120))
+                      }
+                      ContextCompat.startForegroundService(this, intent)
+                  }
+
+                  findViewById<Button>(R.id.stopButton).setOnClickListener {
+                      stopService(Intent(this, RedialService::class.java))
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  handler.post(refresh)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  handler.removeCallbacks(refresh)
+              }
+
+              private fun needed(): Array<String> {
+                  val list = mutableListOf(
+                      Manifest.permission.CALL_PHONE,
+                      Manifest.permission.ANSWER_PHONE_CALLS,
+                      Manifest.permission.READ_CALL_LOG
+                  )
+                  if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
+                  return list.toTypedArray()
+              }
+
+              private fun hasPermissions() = needed().all {
+                  ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+              }
+
+              private fun requestPermissions() {
+                  ActivityCompat.requestPermissions(this, needed(), 1)
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (hasPermissions()) {
+                      Toast.makeText(this, "Permissions granted. Tap Start again.", Toast.LENGTH_SHORT).show()
+                  }
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/example/autoredial
+          cat > app/src/main/java/com/example/autoredial/RedialService.kt <<'EOF'
+          package com.example.autoredial
+
+          import android.annotation.SuppressLint
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.net.Uri
+          import android.os.Build
+          import android.os.IBinder
+          import android.provider.CallLog
+          import android.telecom.TelecomManager
+          import androidx.core.app.NotificationCompat
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.Job
+          import kotlinx.coroutines.cancel
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.isActive
+          import kotlinx.coroutines.launch
+
+          class RedialService : Service() {
+
+              companion object {
+                  const val EXTRA_NUMBER = "number"
+                  const val EXTRA_SECONDS = "seconds"
+                  private const val CHANNEL_ID = "redial"
+                  private const val NOTIF_ID = 1
+
+                  @Volatile var running = false
+                  @Volatile var attempts = 0
+              }
+
+              private val scope = CoroutineScope(Dispatchers.Main)
+              private var job: Job? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val number = intent?.getStringExtra(EXTRA_NUMBER) ?: return START_NOT_STICKY
+                  val seconds = intent.getIntExtra(EXTRA_SECONDS, 22)
+
+                  startAsForeground()
+                  job?.cancel()
+                  attempts = 0
+                  running = true
+
+                  job = scope.launch {
+                      while (isActive) {
+                          attempts++
+                          val startedAt = System.currentTimeMillis()
+                          placeCall(number)
+                          delay(seconds * 1000L)
+                          endCall()
+                          delay(2500L) // let the call log entry get written
+                          if (wasAnswered(startedAt)) {
+                              stopSelf() // call was picked up: stop redialing
+                              break
+                          }
+                      }
+                  }
+                  return START_NOT_STICKY
+              }
+
+              @SuppressLint("MissingPermission")
+              private fun placeCall(number: String) {
+                  val telecom = getSystemService(TelecomManager::class.java)
+                  try {
+                      telecom.placeCall(Uri.fromParts("tel", number, null), null)
+                  } catch (_: SecurityException) {
+                      stopSelf()
+                  }
+              }
+
+              // An unanswered outgoing call is logged with duration 0; an answered one has duration > 0.
+              @SuppressLint("MissingPermission")
+              private fun wasAnswered(since: Long): Boolean {
+                  return try {
+                      contentResolver.query(
+                          CallLog.Calls.CONTENT_URI,
+                          arrayOf(CallLog.Calls.DURATION),
+                          "${CallLog.Calls.TYPE} = ? AND ${CallLog.Calls.DATE} >= ?",
+                          arrayOf(CallLog.Calls.OUTGOING_TYPE.toString(), since.toString()),
+                          "${CallLog.Calls.DATE} DESC"
+                      )?.use { c -> c.moveToFirst() && c.getLong(0) > 0 } ?: false
+                  } catch (_: SecurityException) {
+                      false
+                  }
+              }
+
+              @SuppressLint("MissingPermission")
+              private fun endCall() {
+                  val telecom = getSystemService(TelecomManager::class.java)
+                  try {
+                      telecom.endCall()
+                  } catch (_: SecurityException) {
+                      stopSelf()
+                  }
+              }
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel(CHANNEL_ID, "Auto Redial", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setContentTitle("Auto Redial running")
+                      .setContentText("Open the app and tap Stop to end")
+                      .setSmallIcon(android.R.drawable.sym_action_call)
+                      .setOngoing(true)
+                      .build()
+
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+                  } else {
+                      startForeground(NOTIF_ID, notification)
+                  }
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  job?.cancel()
+                  scope.cancel()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoRedial-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
